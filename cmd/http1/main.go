@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"http1.dev/internal/httpver"
+	"http1.dev/internal/http1"
 )
 
 func printUsage() {
@@ -140,7 +140,7 @@ func main() {
 
 	if *jsonFlag {
 		if len(targets) == 1 {
-			res := httpver.CheckHTTPVersionsJSON(targets[0], overridePort)
+			res := http1.CheckHTTPVersionsJSON(targets[0], overridePort)
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
 			if err := enc.Encode(res); err != nil {
@@ -148,7 +148,7 @@ func main() {
 				os.Exit(1)
 			}
 		} else {
-			res := httpver.CheckHTTPVersionsJSONMulti(targets, overridePort)
+			res := http1.CheckHTTPVersionsJSONMulti(targets, overridePort)
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
 			if err := enc.Encode(res); err != nil {
@@ -163,9 +163,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Scanned %d host(s) in %s\n", len(targets), elapsed.Truncate(time.Millisecond))
 	} else {
 		if len(targets) == 1 {
-			httpver.CheckHTTPVersions(targets[0], overridePort)
+			http1.CheckHTTPVersions(targets[0], overridePort)
 		} else {
-			httpver.CheckHTTPVersionsMulti(targets, overridePort)
+			http1.CheckHTTPVersionsMulti(targets, overridePort)
 		}
 
 		// Human-readable summary on stdout.
@@ -174,6 +174,3 @@ func main() {
 		fmt.Printf("Scanned %d host(s) in %s\n", len(targets), elapsed.Truncate(time.Millisecond))
 	}
 }
-
-
-

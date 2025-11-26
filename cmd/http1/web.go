@@ -1,11 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"html/template"
-	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -14,7 +12,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"http1.dev/internal/httpver"
+	"http1.dev/internal/http1"
 )
 
 const (
@@ -23,7 +21,7 @@ const (
 )
 
 type cacheEntry struct {
-	Results   []httpver.CheckResult
+	Results   []http1.CheckResult
 	ScannedAt time.Time
 	ExpiresAt time.Time
 	Hidden    bool
@@ -41,7 +39,7 @@ func newResultCache() *resultCache {
 	}
 }
 
-func (c *resultCache) get(key string) (results []httpver.CheckResult, scannedAt time.Time, ok bool) {
+func (c *resultCache) get(key string) (results []http1.CheckResult, scannedAt time.Time, ok bool) {
 	now := time.Now()
 
 	c.mu.RLock()
@@ -53,7 +51,7 @@ func (c *resultCache) get(key string) (results []httpver.CheckResult, scannedAt 
 	return entry.Results, entry.ScannedAt, true
 }
 
-func (c *resultCache) set(key string, results []httpver.CheckResult, includeInRecent bool) {
+func (c *resultCache) set(key string, results []http1.CheckResult, includeInRecent bool) {
 	now := time.Now()
 
 	c.mu.Lock()
@@ -94,7 +92,7 @@ type recentSnapshot struct {
 	Target    string
 	URL       string
 	Port      string
-	Results   []httpver.VersionResult
+	Results   []http1.VersionResult
 	ScannedAt time.Time
 	Score     int
 	Grade     string
@@ -138,7 +136,7 @@ func (c *resultCache) recentSnapshots(limit int) []recentSnapshot {
 
 var (
 	webTemplates = template.Must(template.New("index.html").Funcs(template.FuncMap{
-		"statusEmoji": func(v httpver.VersionResult) string {
+		"statusEmoji": func(v http1.VersionResult) string {
 			if v.Supported {
 				return "✅"
 			}
@@ -149,75 +147,73 @@ var (
 		},
 		// legacyNotSupportedOK reports whether this row represents a *good* outcome
 		// for security: HTTP/1.0 or HTTP/1.1 not being supported.
-		"legacyNotSupportedOK": func(v httpver.VersionResult) bool {
+		"legacyNotSupportedOK": func(v http1.VersionResult) bool {
 			if v.Supported {
 				return false
 			}
 			if v.Version != "HTTP/1.0" && v.Version != "HTTP/1.1" {
 				return false
 			}
-			// Treat any "not supported ..." outcome for HTTP/1.x as good from a
-			// security perspective, including "not supported (good) - TCP connection
-			// refused" and the earlier "not supported (or probe failed)" wording.
-			return strings.HasPrefix(v.Detail, "not supported")
+			return true
 		},
 		// http11Warning produces a human-readable warning string for HTTP/1.1 when
 		// the configuration looks risky: either HTTP/1.1 is the highest supported
 		// version (no h2/h3 upgrade path) or HTTP/1.0 downgrade remains possible.
 		// It returns an empty string when there is nothing notable to warn about.
-		"http11Warning": func(all []httpver.VersionResult, v httpver.VersionResult) string {
+		"http11Warning": func(all []http1.VersionResult, v http1.VersionResult) string {
 			if v.Version != "HTTP/1.1" || !v.Supported {
 				return ""
 			}
 
-			var hasH2, hasH3, hasH10 bool
-			for _, vr := range all {
-				switch vr.Version {
-				case "HTTP/3.0":
-					if vr.Supported {
-						hasH3 = true
-					}
-				case "HTTP/2.0":
-					if vr.Supported {
-						hasH2 = true
-					}
-				case "HTTP/1.0":
-					if vr.Supported {
-						hasH10 = true
-					}
-				}
-			}
-
-			var notes []string
-			if !hasH2 && !hasH3 {
-				notes = append(notes, "HTTP/1.1 is the highest supported version; clients cannot upgrade to HTTP/2 or HTTP/3.")
-			}
-			if hasH10 {
-				notes = append(notes, "Clients can be downgraded to HTTP/1.0, which is strongly discouraged.")
-			}
-			if len(notes) == 0 {
-				return ""
-			}
-			return strings.Join(notes, " ")
-		},
-		// versionDowngradeNote explains whether downgrades from HTTP/2 or HTTP/3
-		// to older protocols are possible. Being able to downgrade is generally
-		// undesirable from a security perspective.
-		"versionDowngradeNote": func(all []httpver.VersionResult, v httpver.VersionResult) string {
-			if !v.Supported {
-				return ""
-			}
-
-			var hasH11, hasH2 bool
+			hasH2 := false
+			hasH3 := false
+			hasH10 := false
 			for _, vr := range all {
 				if !vr.Supported {
 					continue
 				}
 				switch vr.Version {
 				case "HTTP/3.0":
-					// Presence of HTTP/3 is implied by v.Version == "HTTP/3.0" when supported.
+					hasH3 = true
 				case "HTTP/2.0":
 					hasH2 = true
+				case "HTTP/1.0":
+					hasH10 = true
+				}
+			}
+
+			// If HTTP/1.1 is the highest supported version, that is a clear warning.
+			if !hasH2 && !hasH3 {
+				if hasH10 {
+					return "Only HTTP/1.x is available and HTTP/1.0 downgrade remains possible"
+				}
+				return "Only HTTP/1.x is available (no HTTP/2 or HTTP/3 upgrade path)"
+			}
+
+			// If we have h2/h3 but HTTP/1.0 is also supported, downgrades are possible.
+			if hasH10 {
+				return "Client can be downgraded from HTTP/2 or HTTP/3 to HTTP/1.0"
+			}
+
+			return ""
+		},
+		// versionDowngradeNote explains whether downgrades from HTTP/2 or HTTP/3
+		// to older protocols are possible. Being able to downgrade is generally
+		// undesirable from a security perspective.
+		"versionDowngradeNote": func(all []http1.VersionResult, v http1.VersionResult) string {
+			if !v.Supported {
+				return ""
+			}
+
+			hasH10 := false
+			hasH11 := false
+			for _, vr := range all {
+				if !vr.Supported {
+					continue
+				}
+				switch vr.Version {
+				case "HTTP/1.0":
+					hasH10 = true
 				case "HTTP/1.1":
 					hasH11 = true
 				}
@@ -225,20 +221,23 @@ var (
 
 			switch v.Version {
 			case "HTTP/3.0":
-				if hasH2 || hasH11 {
-					return "Downgrade to HTTP/2 or HTTP/1.1 is possible (not ideal; prefer keeping clients on HTTP/3)."
+				if hasH10 {
+					return "Can be downgraded from HTTP/3 to HTTP/1.0"
 				}
-				return "Downgrade below HTTP/3 is not possible (good)."
-			case "HTTP/2.0":
 				if hasH11 {
-					return "Downgrade to HTTP/1.1 is possible (not ideal; limit HTTP/1.x exposure)."
+					return "Can be downgraded from HTTP/3 to HTTP/1.1"
 				}
-				return "Downgrade to HTTP/1.1 is not possible (good)."
-			default:
-				return ""
+			case "HTTP/2.0":
+				if hasH10 {
+					return "Can be downgraded from HTTP/2 to HTTP/1.0"
+				}
+				if hasH11 {
+					return "Can be downgraded from HTTP/2 to HTTP/1.1"
+				}
 			}
+			return ""
 		},
-		"statusTitle": func(v httpver.VersionResult) string {
+		"statusTitle": func(v http1.VersionResult) string {
 			if v.Supported {
 				return "supported"
 			}
@@ -247,10 +246,10 @@ var (
 			}
 			return "not supported"
 		},
-		"gradeLabel": func(cr httpver.CheckResult) string {
+		"gradeLabel": func(cr http1.CheckResult) string {
 			return cr.Grade
 		},
-		"gradeClass": func(cr httpver.CheckResult) string {
+		"gradeClass": func(cr http1.CheckResult) string {
 			switch cr.Grade {
 			case "A":
 				return "fantastic"
@@ -260,25 +259,24 @@ var (
 				return "fail"
 			}
 		},
-		// capFirst returns the input string with its first rune uppercased, for
-		// nicer sentence-style descriptions in the UI.
-		"capFirst": func(s string) string {
-			if s == "" {
-				return ""
-			}
-			r, size := utf8.DecodeRuneInString(s)
-			if r == utf8.RuneError && size == 0 {
-				return s
-			}
-			return string(unicode.ToUpper(r)) + s[size:]
-		},
-		"hasVersion": func(results []httpver.VersionResult, want string) bool {
+		"hasVersion": func(results []http1.VersionResult, want string) bool {
 			for _, vr := range results {
 				if vr.Version == want && vr.Supported {
 					return true
 				}
 			}
 			return false
+		},
+		"capFirst": func(s string) string {
+			if s == "" {
+				return s
+			}
+			r, size := utf8.DecodeRuneInString(s)
+			if r == utf8.RuneError && size <= 1 {
+				return s
+			}
+			r = unicode.ToUpper(r)
+			return string(r) + s[size:]
 		},
 		"formatAge": func(t time.Time) string {
 			if t.IsZero() {
@@ -293,7 +291,7 @@ type pageData struct {
 	TargetsRaw     string
 	HideFromRecent bool
 	Error          string
-	Results        []httpver.CheckResult
+	Results        []http1.CheckResult
 	HasResults     bool
 	UsedCache      bool
 	CacheAge       string
@@ -307,6 +305,11 @@ func runWebServer(listenAddr string) error {
 	cache := newResultCache()
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok\n"))
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		handleScan(w, r, cache)
 	})
@@ -325,7 +328,7 @@ func runWebServer(listenAddr string) error {
 		Handler: mux,
 	}
 
-	fmt.Printf("http1.dev web UI listening on %s\n", listenAddr)
+	fmt.Printf("http1 web UI listening on %s\n", listenAddr)
 	return server.ListenAndServe()
 }
 
@@ -379,7 +382,7 @@ func handleScan(w http.ResponseWriter, r *http.Request, cache *resultCache) {
 	isJSON := wantsJSON(r)
 	key := cacheKey(targets)
 
-	var results []httpver.CheckResult
+	var results []http1.CheckResult
 	var usedCache bool
 	var cacheAge string
 	if cached, scannedAt, ok := cache.get(key); ok {
@@ -389,62 +392,16 @@ func handleScan(w http.ResponseWriter, r *http.Request, cache *resultCache) {
 	} else {
 		// For web mode we always use the default port behavior (no override).
 		if len(targets) == 1 {
-			res := httpver.CheckHTTPVersionsJSON(targets[0], "")
-			results = []httpver.CheckResult{res}
+			res := http1.CheckHTTPVersionsJSON(targets[0], "")
+			results = []http1.CheckResult{res}
 		} else {
-			results = httpver.CheckHTTPVersionsJSONMulti(targets, "")
+			results = http1.CheckHTTPVersionsJSONMulti(targets, "")
 		}
-
-		// Only include scans that produced at least one successful protocol
-		// result in the "recently scanned" overview. Completely failed scans
-		// (invalid hostname, no DNS, timeouts, etc.) are still cached so we can
-		// reuse their results, but they are not surfaced as recent examples.
-		includeInRecent := !hideFromRecent && hasSuccessfulResult(results)
-		cache.set(key, results, includeInRecent)
+		cache.set(key, results, !hideFromRecent)
 	}
 
 	if isJSON {
 		renderJSON(w, results)
-		return
-	}
-
-	// If we have a single target that failed hostname/URL validation, surface a clear
-	// alert instead of showing protocol/grade rows, since we never actually scanned.
-	if msg, ok := inputValidationError(results); ok {
-		const recentLimit = 12
-		recent := cache.recentSnapshots(recentLimit)
-		best := filterByGrade(recent, "A", 6)
-		worst := filterByGrade(recent, "F", 6)
-
-		renderHTML(w, pageData{
-			TargetsRaw: raw,
-			Error:      msg,
-			HasResults: false,
-			Page:       "scanner",
-			Recent:     recent,
-			Best:       best,
-			Worst:      worst,
-		})
-		return
-	}
-
-	// If the hostname does not resolve via DNS (no records / NXDOMAIN), provide a
-	// clear warning to the user rather than only generic probe failures.
-	if msg, ok := unresolvedHostError(results); ok {
-		const recentLimit = 12
-		recent := cache.recentSnapshots(recentLimit)
-		best := filterByGrade(recent, "A", 6)
-		worst := filterByGrade(recent, "F", 6)
-
-		renderHTML(w, pageData{
-			TargetsRaw: raw,
-			Error:      msg,
-			HasResults: false,
-			Page:       "scanner",
-			Recent:     recent,
-			Best:       best,
-			Worst:      worst,
-		})
 		return
 	}
 
@@ -466,62 +423,6 @@ func handleScan(w http.ResponseWriter, r *http.Request, cache *resultCache) {
 		Worst:          worst,
 		Page:           "scanner",
 	})
-}
-
-// inputValidationError inspects the results for a single-target scan and determines
-// whether the failure was due to an invalid hostname/URL (as opposed to a network
-// issue). It returns a user-facing message when that is the case.
-func inputValidationError(results []httpver.CheckResult) (string, bool) {
-	if len(results) != 1 {
-		return "", false
-	}
-	cr := results[0]
-	if len(cr.Results) == 0 {
-		return "", false
-	}
-	vr := cr.Results[0]
-	if vr.Version != "error" || !vr.Error {
-		return "", false
-	}
-
-	// Compose a friendly message for the scanner UI.
-	detail := vr.Detail
-	if detail == "" {
-		detail = "invalid hostname or URL"
-	}
-	msg := fmt.Sprintf("The hostname %q is invalid and cannot be scanned (%s).", cr.Target, detail)
-	return msg, true
-}
-
-// unresolvedHostError returns a friendly message when a single-target scan failed
-// because the hostname does not resolve via DNS (no records / NXDOMAIN).
-func unresolvedHostError(results []httpver.CheckResult) (string, bool) {
-	if len(results) != 1 {
-		return "", false
-	}
-	cr := results[0]
-	if !cr.Unresolved {
-		return "", false
-	}
-	msg := fmt.Sprintf("The hostname %q cannot be scanned (no DNS records found).", cr.Target)
-	return msg, true
-}
-
-// hasSuccessfulResult reports whether at least one CheckResult contains a
-// supported protocol, meaning the scan was able to reach and meaningfully
-// probe the host.
-func hasSuccessfulResult(results []httpver.CheckResult) bool {
-	for _, cr := range results {
-		if cr.Unresolved {
-			continue
-		}
-		for _, vr := range cr.Results {
-			if vr.Supported {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func selectTopByScore(src []recentSnapshot, descending bool, limit int) []recentSnapshot {
@@ -635,19 +536,13 @@ func wantsJSON(r *http.Request) bool {
 }
 
 func renderHTML(w http.ResponseWriter, data pageData) {
-	// Render into a buffer first so that if the template fails we can still send
-	// a clean 500 response without writing headers/body twice.
-	var buf bytes.Buffer
-	if err := webTemplates.ExecuteTemplate(&buf, "index.html", data); err != nil {
-		log.Printf("template execution error: %v (page=%s, targets=%q)", err, data.Page, data.TargetsRaw)
-		http.Error(w, "template error", http.StatusInternalServerError)
-		return
-	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write(buf.Bytes())
+	if err := webTemplates.ExecuteTemplate(w, "index.html", data); err != nil {
+		http.Error(w, "template error", http.StatusInternalServerError)
+	}
 }
 
-func renderJSON(w http.ResponseWriter, results []httpver.CheckResult) {
+func renderJSON(w http.ResponseWriter, results []http1.CheckResult) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -664,6 +559,3 @@ func renderJSON(w http.ResponseWriter, results []httpver.CheckResult) {
 		http.Error(w, "failed to encode JSON", http.StatusInternalServerError)
 	}
 }
-
-
-
