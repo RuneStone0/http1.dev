@@ -10,7 +10,7 @@
 ##   # Run web UI on port 8080
 ##   docker run --rm -p 8080:8080 http1-dev
 
-FROM golang:1.24 AS builder
+FROM golang:1.27 AS builder
 
 WORKDIR /app
 
