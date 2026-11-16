@@ -10,7 +10,7 @@
 ##   # Run web UI on port 8080
 ##   docker run --rm -p 8080:8080 http1-dev
 
-FROM golang:1.24 AS builder
+FROM golang:1.27 AS builder
 
 WORKDIR /app
 
@@ -24,7 +24,7 @@ COPY . .
 # Build a static-ish Linux binary
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /http1 ./cmd/http1
 
-FROM alpine:3.20
+FROM alpine:3.24
 
 WORKDIR /app
 
